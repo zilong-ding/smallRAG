@@ -1,8 +1,42 @@
 import os
+
+import numpy as np
+import torch
+
 os.environ["OPENAI_API_KEY"] = "sk-ea07bf0880504b75a31b1bce38437fcf"
 os.environ["OPENAI_BASE_URL"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 import openai
 from typing import Optional,List,Dict
+from transformers import AutoTokenizer, AutoModelForSequenceClassification  # type: ignore
+from sentence_transformers import SentenceTransformer  # type: ignore
+
+class Embedding:
+    def __init__(self):
+        self.model_path = "/home/dzl/PycharmProjects/SmallRag/BAAI/bge-base-zh-v1.5"
+        self.model = SentenceTransformer.from_pretrained(self.model_path)
+
+    def embed(self,text:str)->np.ndarray:
+        return self.model.encode(text)
+
+    def check_similarity(self,embedding1,embedding2):
+        similarity = self.model.similarity(embedding1, embedding2)
+        return similarity.numpy()
+
+class RankModel:
+    def __init__(self):
+        self.model_path = "/home/dzl/PycharmProjects/SmallRag/BAAI/bge-reranker-base"
+        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        self.model.eval()
+        self.model.to("cuda" if torch.cuda.is_available() else "cpu")
+
+    def rank(self,question,answers:list[str])->np.ndarray:
+        pairs = [[question, c] for c in answers]
+        with torch.no_grad():
+            inputs = self.tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=512)
+            scores = self.model(**inputs, return_dict=True).logits.view(-1, ).float()
+            print(scores)
+            return scores.cpu().numpy()
 
 
 

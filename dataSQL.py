@@ -95,6 +95,7 @@ class Document(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     embedding_status = Column(String, default="pending")  # "pending", "completed", "failed"
     file_size = Column(Integer, default=0)          # 文件大小（字节）
+    file_hash = Column(String, index=True)  # SHA256 哈希值
 
     # 外键：属于哪个 Workspace
     workspace_id = Column(Integer, ForeignKey('workspaces.id', ondelete="CASCADE"), nullable=False)

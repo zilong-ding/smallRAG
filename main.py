@@ -1,9 +1,15 @@
-import gradio as gr
 import os
+
+# 清除所有代理变量
+for var in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]:
+    if var in os.environ:
+        del os.environ[var]
+
+import gradio as gr
 from typing import Callable, Optional
 from AuthManager import AuthManager
 import requests
-
+import pandas as pd
 # FastAPI 服务地址
 BASE_URL = "http://localhost:8000"
 
@@ -23,12 +29,24 @@ class RAGChatApp:
         self.title = title
         self.current_user = ""
         self.workspace = None
-        self.file_list_value = []
+        # 先创建空 DataFrame（不指定 dtype）
+        self.file_list_value = pd.DataFrame(
+            [],
+            columns=["选择", "文件名", "大小", "修改时间"]
+        )
+
+        # 再显式转换列类型
+        self.file_list_value = self.file_list_value.astype({
+            "选择": "bool",
+            "文件名": "string",  # 推荐用 "string" 而非 "str"
+            "大小": "string",
+            "修改时间": "string"
+        })
         self.demo = self._build_ui()
 
     def upload_to_fastapi(self,files):
         if not files:
-            return "❌ 未选择文件"
+            return "❌ 未选择文件",self.file_list_value, gr.update(value=None)
         workspace_name = self.workspace_dropdown.value
         results = []
         for file_path in files:
@@ -55,17 +73,16 @@ class RAGChatApp:
                         # headers={"Authorization": f"Bearer {token}"}  # 如需认证
                     )
                 if resp.status_code == 200:
-                    results.append(f"✅ {filename} 上传成功")
                     r = resp.json()
-                    print(r)
-                    self.file_list_value.append([r["filename"],r["size"],r["modified"]])
-                    # self.file_list.update(value=self.file_list_value)
+                    results.append(f"✅ {r["message"]} ")
+                    if "更新" not in r["message"]:
+                        self.file_list_value.loc[len(self.file_list_value)] = [False,r["filename"],r["size"],r["modified"]]
                 else:
                     results.append(f"❌ {filename} 失败: {resp.text}")
             except Exception as e:
                 results.append(f"❌ {filename} 异常: {str(e)}")
 
-        return "\n".join(results),self.file_list_value
+        return "\n".join(results),self.file_list_value, gr.update(value=None)
 
     def on_logout(self):
         return gr.update(visible=True), gr.update(visible=False), ""
@@ -80,7 +97,7 @@ class RAGChatApp:
             # 登录成功后自动跳转到主页
             self.current_user = username
             self.workspaceChoices = self.getWorkspace()
-            self.file_list_value = self.getWorkspaceFiles()
+            self.getWorkspaceFiles()
             # self.file_list.value = self.file_list_value
             return gr.update(visible=False),gr.update(visible=True),username,"登录成功",self.file_list_value
         else:
@@ -195,14 +212,16 @@ class RAGChatApp:
         if response.status_code == 200:
             files = response.json()
             if files:
+                self.file_list_value = self.file_list_value.iloc[0:0]
                 print("获取文件成功")
-                return [[file["name"], file["size"], file["modified"]] for file in files]
+                for file in files:
+                    self.file_list_value.loc[len(self.file_list_value)] =[False,file["name"], file["size"], file["modified"]]
             else:
                 print("获取文件失败")
-                return []
+                # return []
         else:
             print("http 获取文件失败")
-            return []
+            # return []
 
     def _build_main_ui(self):
         """构建主页面（聊天+文件管理）"""
@@ -213,18 +232,32 @@ class RAGChatApp:
             with gr.Column():
                 gr.Markdown("### 📁 文件管理")
                 self.workspace_dropdown = gr.Dropdown(label="当前工作区", choices=self.workspaceChoices,interactive= True)
-                self.file_upload = gr.File(file_count="multiple", label="上传文件")
+                self.file_upload = gr.File(file_count="multiple", label="上传文件",height=80)
                 self.upload_btn = gr.Button("上传", variant="primary")
-                self.upload_output = gr.Textbox(label="上传结果", lines=5)
+                self.upload_output = gr.Textbox(label="上传结果", lines=2)
                 with gr.Row():
-                    self.create_folder = gr.Textbox(label="新建工作区", scale=2)
+                    self.create_folder = gr.Textbox(label="新建工作区", scale=1)
                     self.create_btn = gr.Button("创建", scale=1)
-                    self.rag_enabled = gr.Checkbox(label="启用 RAG", value=True)
-                self.file_list = gr.DataFrame(label="文件列表", headers=["文件名", "大小", "修改时间"])
+                    self.rag_enabled = gr.Checkbox(label="启用 RAG", value=True,scale=1)
+                self.file_list = gr.DataFrame(label="文件列表",
+                                              headers=["选择", "文件名", "大小", "修改时间"],
+                                              static_columns=[1, 2, 3],  # 关键：第1、2、3列（0-indexed）不可编辑
+                                              datatype=["bool", "str", "str", "str"],  # 第一列为 bool → 显示为 checkbox
+                                              interactive=True,  # 必须为 True 才能编辑 checkbox
+                                              row_count=(0, "dynamic"),
+                                              col_count=(4, "fixed")
+                                              )
                 self.upload_btn.click(
                     self.upload_to_fastapi,
                     inputs=self.file_upload,
-                    outputs=[self.upload_output, self.file_list]
+                    outputs=[self.upload_output, self.file_list,self.file_upload]
+                )
+                self.delete_rows_btn = gr.Button("删除选中行")
+                self.delete_output = gr.Textbox(label="删除结果", lines=2)
+                self.delete_rows_btn.click(
+                    self.delete_rows,
+                    inputs=[self.file_list,self.workspace_dropdown],
+                    outputs=[self.file_list,self.delete_output]
                 )
                 self.workspace_dropdown.change(self.change_workspace)
 
@@ -241,6 +274,63 @@ class RAGChatApp:
 
     def change_workspace(self):
         pass
+
+    def delete_rows(self, df: pd.DataFrame,workspace_name: str):
+        message = ""
+        if df.empty:
+            return df, message
+
+        # 1. 提取所有选中的文件名
+        selected_mask = df["选择"] == True
+        selected_files = df[selected_mask]["文件名"].tolist()
+
+        if not selected_files:
+            return df, "未选择任何文件"
+
+        success_files = []
+        failed_files = []
+
+        # 2. 逐个发送 DELETE 请求
+        for file_name in selected_files:
+            try:
+                url = f"{BASE_URL}/workspaces/{self.current_user}/{workspace_name}/documents/{file_name}"
+                # print("url", url)
+                response = requests.delete(url, timeout=10)  # 使用 DELETE
+
+                if response.status_code == 200:
+                    try:
+                        results = response.json()
+                        if results.get("success", False):
+                            success_files.append(file_name)
+                        else:
+                            failed_files.append((file_name, results.get("message", "未知错误")))
+                    except ValueError:
+                        # 响应不是 JSON
+                        failed_files.append((file_name, "响应格式错误"))
+                else:
+                    failed_files.append((file_name, f"HTTP {response.status_code}"))
+
+            except requests.RequestException as e:
+                failed_files.append((file_name, f"请求异常: {str(e)}"))
+
+        # 3. 更新 DataFrame：移除所有成功删除的行
+        if success_files:
+            # 保留未被成功删除的行（注意：可能部分成功）
+            df = df[~df["文件名"].isin(success_files)].copy()
+            df = df.reset_index(drop=True)
+
+        # 4. 构造返回消息
+        parts = []
+        if success_files:
+            parts.append(f"成功删除 {len(success_files)} 个文件: {', '.join(success_files)}")
+        if failed_files:
+            fail_msgs = [f"{f}: {msg}" for f, msg in failed_files]
+            parts.append(f"删除失败 ({len(failed_files)} 个): " + "; ".join(fail_msgs))
+
+        message = "; ".join(parts) if parts else "无文件被删除"
+        self.file_list_value = df
+
+        return df, message
 
     @staticmethod
     def _switch_to_register():
