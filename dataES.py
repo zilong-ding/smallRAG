@@ -1,260 +1,314 @@
-from elasticsearch import Elasticsearch
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+from elasticsearch import Elasticsearch, NotFoundError
+from elasticsearch.exceptions import ConnectionError
 import traceback
-"""
-RAG 系统 Elasticsearch 索引初始化脚本
 
-该系统包含以下索引，每个索引的设计目标与字段说明如下：
+class DocumentMeta(BaseModel):
+    doc_id: str
+    workspace_id: str
+    user_username: str
+    title: str
+    file_name: str
+    abstract: str
+    full_content: str
+    embedding_status: str = "pending"  # pending/completed/failed
+    file_size: int
+    file_hash: str
+    created_at: datetime
+    updated_at: datetime
 
-1️⃣ document_meta（文档元信息索引）
-   - 用途：存储用户上传的原始文档信息，用于全文检索和管理。
-   - 核心字段：
-       * doc_id (keyword)：文档唯一 ID
-       * workspace_id (keyword)：所属工作区 ID
-       * user_username (keyword)：上传者用户名
-       * title / file_name / abstract / full_content (text)：文档内容，可全文检索
-       * embedding_status (keyword)：向量是否已生成（pending/completed/failed）
-       * file_size / file_hash (integer/keyword)：文档文件大小及哈希
-       * created_at / updated_at (date)：文档创建和更新时间
-   - 检索方式：全文检索（倒排索引）
+class ChunkInfo(BaseModel):
+    chunk_id: str
+    doc_id: str
+    workspace_id: str
+    user_username: str
+    chunk_content: str
+    embedding_vector: List[float] = Field(..., min_length=1536, max_length=1536)
+    chunk_order: int
+    page_number: Optional[int] = None
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime
 
-2️⃣ chunk_info（文档分块索引）
-   - 用途：将长文档拆分为小块用于语义检索（向量检索），适合 RAG 检索召回阶段。
-   - 核心字段：
-       * chunk_id / doc_id / workspace_id / user_username (keyword)：分块 ID、所属文档、工作区及用户信息
-       * chunk_content (text)：分块文本，可做关键词检索
-       * embedding_vector (dense_vector)：向量表示，支持语义相似度检索
-       * chunk_order / page_number (integer)：记录分块顺序与原文页码
-       * metadata (object)：可扩展元信息
-       * created_at (date)：创建时间
-   - 检索方式：语义向量检索为主，可兼顾关键词搜索
+class QAHistory(BaseModel):
+    qa_id: str
+    user_username: str
+    question: str
+    answer: str
+    qa_vector: List[float] = Field(..., min_length=1536, max_length=1536)
+    qa_concat_vector: List[float] = Field(..., min_length=1536, max_length=1536)
+    workspace_id: str
+    created_at: datetime
 
-3️⃣ qa_history（历史问答索引）
-   - 用途：存储用户与大模型的问答记录，用于快速检索过去问答、知识复用与 RAG 检索。
-   - 核心字段：
-       * qa_id (keyword)：问答唯一 ID
-       * user_username / workspace_id (keyword)：所属用户与工作区
-       * question / answer (text)：问答文本，可全文检索
-       * qa_vector / qa_concat_vector (dense_vector)：问答语义向量，用于语义相似度检索
-       * created_at (date)：创建时间
-   - 检索方式：支持关键词全文检索 + 向量语义检索，可混合排序
-
-4️⃣ image_info（图片索引）
-   - 用途：存储用户上传的图片信息，用于图像语义检索、文本搜索和标签过滤。
-   - 核心字段：
-       * image_id / user_username / workspace_id (keyword)：图片 ID、所属用户与工作区
-       * image_path (keyword)：图片存储路径或 URL
-       * caption (text)：图片文本描述，可全文检索
-       * tags (keyword)：可选标签，方便过滤和聚合
-       * embedding_vector (dense_vector)：图片向量（CLIP 等），支持语义检索
-       * metadata (object)：可扩展元信息，如拍摄设备、颜色、EXIF 等
-       * file_size / width / height / format (integer/keyword)：文件大小及图片属性
-       * created_at (date)：上传时间
-   - 检索方式：全文检索 + 向量语义检索 + 标签过滤
-
-未来扩展：
-- 可以增加视频数据库索引，设计方式与 image_info 类似，支持视频向量检索和元数据管理。
-"""
-
-# 连接 Elasticsearch（默认无用户名密码）
-es = Elasticsearch("http://localhost:9200")
+class ImageInfo(BaseModel):
+    image_id: str
+    user_username: str
+    workspace_id: str
+    image_path: str
+    caption: str
+    tags: List[str]  # 注意：ES 中必须是 keyword 类型！
+    embedding_vector: List[float] = Field(..., min_length=512, max_length=512)
+    metadata: dict = Field(default_factory=dict)
+    file_size: int
+    width: int
+    height: int
+    format: str
+    created_at: datetime
 
 # =========================
-# 1️⃣ 文档索引（全文检索）
+# Elasticsearch 数据库管理类
 # =========================
-document_meta_mapping = {
-    "mappings": {
-        "properties": {
-            "doc_id": {"type": "keyword"},
-            "workspace_id": {"type": "keyword"},
-            "user_username": {"type": "keyword"},
-            "title": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_max_word"
-            },
-            "file_name": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_max_word"
-            },
-            "abstract": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_max_word"
-            },
-            "full_content": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_max_word"
-            },
-            "embedding_status": {"type": "keyword"},  # pending/completed/failed
-            "file_size": {"type": "integer"},
-            "file_hash": {"type": "keyword"},
-            "created_at": {"type": "date"},
-            "updated_at": {"type": "date"}
+
+class SmallRAGDB:
+    def __init__(self, es_url: str = "http://localhost:9200"):
+        self.es = Elasticsearch(es_url)
+        self._indices = {
+            "document": "smallrag_document_meta",
+            "chunk": "smallrag_chunk_info",
+            "qa": "smallrag_qa_history",
+            "image": "smallrag_image_info"
         }
-    }
-}
 
-# =========================
-# 2️⃣ 文档分块索引（语义检索）
-# =========================
-chunk_info_mapping = {
-    "mappings": {
-        "properties": {
-            "chunk_id": {"type": "keyword"},
-            "doc_id": {"type": "keyword"},
-            "workspace_id": {"type": "keyword"},
-            "user_username": {"type": "keyword"},
-            "chunk_content": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_max_word"
-            },
-            "embedding_vector": {
-                "type": "dense_vector",
-                "dims": 1536,  # 根据向量模型维度设置
-                "index": True,
-                "similarity": "cosine"
-            },
-            "chunk_order": {"type": "integer"},
-            "page_number": {"type": "integer"},
-            "metadata": {"type": "object"},
-            "created_at": {"type": "date"}
-        }
-    }
-}
+    # -------------------------
+    # 1. 索引初始化
+    # -------------------------
 
-# =========================
-# 3️⃣ 历史问答索引（全文 + 语义）
-# =========================
-qa_history_mapping = {
-    "mappings": {
-        "properties": {
-            "qa_id": {"type": "keyword"},
-            "user_username": {"type": "keyword"},
+    def init_indices(self, overwrite: bool = False) -> bool:
+        """初始化所有索引"""
+        try:
+            if not self.es.ping():
+                print("❌ 无法连接 Elasticsearch")
+                return False
 
-            # 全文检索字段
-            "question": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_smart"
-            },
-            "answer": {
-                "type": "text",
-                "analyzer": "ik_max_word",
-                "search_analyzer": "ik_smart"
-            },
+            mappings = self._get_mappings()
 
-            # 语义检索向量
-            "qa_vector": {
-                "type": "dense_vector",
-                "dims": 1536,
-                "index": True,
-                "similarity": "cosine"
-            },
-            "qa_concat_vector": {  # 问答拼接向量，用于更高质量语义检索
-                "type": "dense_vector",
-                "dims": 1536,
-                "index": True,
-                "similarity": "cosine"
-            },
+            for name, index_name in self._indices.items():
+                if self.es.indices.exists(index=index_name):
+                    if overwrite:
+                        self.es.indices.delete(index=index_name)
+                        self.es.indices.create(index=index_name, body=mappings[name])
+                        print(f"🔄 已覆盖重建索引: {index_name}")
+                    else:
+                        print(f"ℹ️ 索引已存在: {index_name}")
+                else:
+                    self.es.indices.create(index=index_name, body=mappings[name])
+                    print(f"✅ 已创建索引: {index_name}")
 
-            # 元信息
-            "workspace_id": {"type": "keyword"},
-            "created_at": {"type": "date"}
-        }
-    }
-}
+            print("🎉 所有索引初始化完成！")
+            return True
 
-# =========================
-# 4️⃣ 图片索引（全文 + 标签 + 语义）
-# =========================
-image_info_mapping = {
-    "mappings": {
-        "properties": {
-            "image_id": {"type": "keyword"},
-            "user_username": {"type": "keyword"},
-            "workspace_id": {"type": "keyword"},
-            "image_path": {"type": "keyword"},  # 文件路径或 URL
-
-            # 文本检索字段
-            "caption": {
-                "type": "text",
-                "analyzer": "ik_max_word",  # 建索引时细分
-                "search_analyzer": "ik_smart"  # 查询时粗分
-            },
-            "tags": {"type": "keyword"},  # 可选标签，方便过滤
-
-            # 图像语义向量（CLIP embedding）
-            "embedding_vector": {
-                "type": "dense_vector",
-                "dims": 512,
-                "index": True,
-                "similarity": "cosine"
-            },
-
-            # 元信息
-            "metadata": {"type": "object"},
-            "file_size": {"type": "integer"},
-            "width": {"type": "integer"},
-            "height": {"type": "integer"},
-            "format": {"type": "keyword"},
-            "created_at": {"type": "date"}
-        }
-    }
-}
-
-
-# =========================
-# 初始化所有索引函数
-# =========================
-def init_es_indices(overwrite=False):
-    """
-    初始化 Elasticsearch 索引
-    :param overwrite: 如果索引已存在，是否删除重建
-    :return: True/False 表示初始化是否成功
-    """
-    try:
-        if not es.ping():
-            print("❌ 无法连接 Elasticsearch")
+        except Exception as e:
+            print("❌ 初始化索引失败:", str(e))
+            traceback.print_exc()
             return False
 
-        # 所有索引及其映射
-        indices = {
-            "smallrag_document_meta": document_meta_mapping,
-            "smallrag_chunk_info": chunk_info_mapping,
-            "smallrag_qa_history": qa_history_mapping,
-            "smallrag_image_info": image_info_mapping
+    def _get_mappings(self) -> Dict[str, Dict]:
+        """返回所有索引的 mapping 定义（与你原始定义一致）"""
+        return {
+            "document": {
+                "mappings": {
+                    "properties": {
+                        "doc_id": {"type": "keyword"},
+                        "workspace_id": {"type": "keyword"},
+                        "user_username": {"type": "keyword"},
+                        "title": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_max_word"},
+                        "file_name": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_max_word"},
+                        "abstract": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_max_word"},
+                        "full_content": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_max_word"},
+                        "embedding_status": {"type": "keyword"},
+                        "file_size": {"type": "integer"},
+                        "file_hash": {"type": "keyword"},
+                        "created_at": {"type": "date"},
+                        "updated_at": {"type": "date"}
+                    }
+                }
+            },
+            "chunk": {
+                "mappings": {
+                    "properties": {
+                        "chunk_id": {"type": "keyword"},
+                        "doc_id": {"type": "keyword"},
+                        "workspace_id": {"type": "keyword"},
+                        "user_username": {"type": "keyword"},
+                        "chunk_content": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_max_word"},
+                        "embedding_vector": {"type": "dense_vector", "dims": 1536, "index": True, "similarity": "cosine"},
+                        "chunk_order": {"type": "integer"},
+                        "page_number": {"type": "integer"},
+                        "metadata": {"type": "object"},
+                        "created_at": {"type": "date"}
+                    }
+                }
+            },
+            "qa": {
+                "mappings": {
+                    "properties": {
+                        "qa_id": {"type": "keyword"},
+                        "user_username": {"type": "keyword"},
+                        "question": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                        "answer": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                        "qa_vector": {"type": "dense_vector", "dims": 1536, "index": True, "similarity": "cosine"},
+                        "qa_concat_vector": {"type": "dense_vector", "dims": 1536, "index": True, "similarity": "cosine"},
+                        "workspace_id": {"type": "keyword"},
+                        "created_at": {"type": "date"}
+                    }
+                }
+            },
+            "image": {
+                "mappings": {
+                    "properties": {
+                        "image_id": {"type": "keyword"},
+                        "user_username": {"type": "keyword"},
+                        "workspace_id": {"type": "keyword"},
+                        "image_path": {"type": "keyword"},
+                        "caption": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+                        "tags": {"type": "keyword"},  # ✅ 确保是 keyword
+                        "embedding_vector": {"type": "dense_vector", "dims": 512, "index": True, "similarity": "cosine"},
+                        "metadata": {"type": "object"},
+                        "file_size": {"type": "integer"},
+                        "width": {"type": "integer"},
+                        "height": {"type": "integer"},
+                        "format": {"type": "keyword"},
+                        "created_at": {"type": "date"}
+                    }
+                }
+            }
         }
 
-        for name, mapping in indices.items():
-            if es.indices.exists(index=name):
-                if overwrite:
-                    es.indices.delete(index=name)
-                    es.indices.create(index=name, body=mapping)
-                    print(f"🔄 已覆盖重建索引: {name}")
-                else:
-                    print(f"ℹ️ 索引已存在: {name}")
-            else:
-                es.indices.create(index=name, body=mapping)
-                print(f"✅ 已创建索引: {name}")
+    # -------------------------
+    # 2. 文档（Document）操作
+    # -------------------------
 
-        print("🎉 所有索引已初始化完成！")
-        # 验证 mapping 是否正确加载
-        actual_mapping = es.indices.get_mapping(index="smallrag_image_info")
-        tags_type = actual_mapping["smallrag_image_info"]["mappings"]["properties"]["tags"]["type"]
-        assert tags_type == "keyword", f"tags 字段类型错误: {tags_type}"
-        return True
+    def create_document(self, doc_id: str, data: Dict[str, Any]) -> Dict:
+        return self.es.index(index=self._indices["document"], id=doc_id, body=data)
 
-    except Exception as e:
-        print(traceback.format_exc())
-        print("❌ 创建索引时出错:", str(e))
-        return False
+    def get_document(self, doc_id: str) -> Optional[Dict]:
+        try:
+            return self.es.get(index=self._indices["document"], id=doc_id)["_source"]
+        except NotFoundError:
+            return None
 
+    def update_document(self, doc_id: str, update_data: Dict[str, Any]) -> Dict:
+        return self.es.update(index=self._indices["document"], id=doc_id, body={"doc": update_data})
 
-# =========================
-# 调用示例
-# =========================
-if __name__ == "__main__":
-    init_es_indices(overwrite=True)  # 👈 关键！
+    def delete_document(self, doc_id: str) -> Dict:
+        return self.es.delete(index=self._indices["document"], id=doc_id)
+
+    # -------------------------
+    # 3. 分块（Chunk）操作
+    # -------------------------
+
+    def create_chunk(self, chunk_id: str, data: Dict[str, Any]) -> Dict:
+        return self.es.index(index=self._indices["chunk"], id=chunk_id, body=data)
+
+    def get_chunk(self, chunk_id: str) -> Optional[Dict]:
+        try:
+            return self.es.get(index=self._indices["chunk"], id=chunk_id)["_source"]
+        except NotFoundError:
+            return None
+
+    def update_chunk(self, chunk_id: str, update_data: Dict[str, Any]) -> Dict:
+        return self.es.update(index=self._indices["chunk"], id=chunk_id, body={"doc": update_data})
+
+    def delete_chunk(self, chunk_id: str) -> Dict:
+        return self.es.delete(index=self._indices["chunk"], id=chunk_id)
+
+    # -------------------------
+    # 4. 问答（QA）操作
+    # -------------------------
+
+    def create_qa(self, qa_id: str, data: Dict[str, Any]) -> Dict:
+        return self.es.index(index=self._indices["qa"], id=qa_id, body=data)
+
+    def get_qa(self, qa_id: str) -> Optional[Dict]:
+        try:
+            return self.es.get(index=self._indices["qa"], id=qa_id)["_source"]
+        except NotFoundError:
+            return None
+
+    def update_qa(self, qa_id: str, update_data: Dict[str, Any]) -> Dict:
+        return self.es.update(index=self._indices["qa"], id=qa_id, body={"doc": update_data})
+
+    def delete_qa(self, qa_id: str) -> Dict:
+        return self.es.delete(index=self._indices["qa"], id=qa_id)
+
+    # -------------------------
+    # 5. 图片（Image）操作
+    # -------------------------
+
+    def create_image(self, image_id: str, data: Dict[str, Any]) -> Dict:
+        return self.es.index(index=self._indices["image"], id=image_id, body=data)
+
+    def get_image(self, image_id: str) -> Optional[Dict]:
+        try:
+            return self.es.get(index=self._indices["image"], id=image_id)["_source"]
+        except NotFoundError:
+            return None
+
+    def update_image(self, image_id: str, update_data: Dict[str, Any]) -> Dict:
+        return self.es.update(index=self._indices["image"], id=image_id, body={"doc": update_data})
+
+    def delete_image(self, image_id: str) -> Dict:
+        return self.es.delete(index=self._indices["image"], id=image_id)
+
+    # -------------------------
+    # 6. 搜索接口
+    # -------------------------
+
+    def search_documents(self, query: Dict, size: int = 10) -> List[Dict]:
+        res = self.es.search(index=self._indices["document"], body=query, size=size)
+        return [hit["_source"] for hit in res["hits"]["hits"]]
+
+    def search_chunks_by_vector(self, vector: List[float], k: int = 5) -> List[Dict]:
+        res = self.es.search(
+            index=self._indices["chunk"],
+            body={
+                "knn": {
+                    "field": "embedding_vector",
+                    "query_vector": vector,
+                    "k": k,
+                    "num_candidates": max(10, k * 2)
+                }
+            }
+        )
+        return [hit["_source"] for hit in res["hits"]["hits"]]
+
+    def search_images_by_tags_and_caption(
+        self,
+        caption_keyword: str,
+        tags: List[str],
+        size: int = 10
+    ) -> List[Dict]:
+        query = {
+            "query": {
+                "bool": {
+                    "must": [{"match": {"caption": caption_keyword}}],
+                    "filter": [{"terms": {"tags": tags}}]
+                }
+            }
+        }
+        res = self.es.search(index=self._indices["image"], body=query, size=size)
+        return [hit["_source"] for hit in res["hits"]["hits"]]
+
+    def search_images_by_vector(self, vector: List[float], k: int = 5) -> List[Dict]:
+        res = self.es.search(
+            index=self._indices["image"],
+            body={
+                "knn": {
+                    "field": "embedding_vector",
+                    "query_vector": vector,
+                    "k": k,
+                    "num_candidates": max(10, k * 2)
+                }
+            }
+        )
+        return [hit["_source"] for hit in res["hits"]["hits"]]
+
+    # -------------------------
+    # 7. 工具方法
+    # -------------------------
+
+    def refresh_all(self):
+        """强制刷新所有索引（测试用）"""
+        for index in self._indices.values():
+            self.es.indices.refresh(index=index)
