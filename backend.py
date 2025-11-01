@@ -1,5 +1,4 @@
 import os
-
 # 清除所有代理变量
 for var in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]:
     if var in os.environ:
@@ -10,16 +9,167 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from werkzeug.security import generate_password_hash,check_password_hash
-from dataSQL import User,get_db,Workspace,Document
-from dataSchames import RegisterRequest,RegisterResponse,UserResponse,LoginRequest,FileItem
-from model import ChatCompletion
-from typing import List
+from dataSQL import User,get_db,Workspace,Document,Conversation
+from dataSchames import (RegisterRequest,RegisterResponse,UserResponse,ConversationsResponse,
+                         LoginRequest,FileItem,chatRequest,chatResponse,Message)
+from model import ChatCompletion,Embedding,RankModel
+from typing import List,Dict
 import shutil
 import hashlib
 
 
 app = FastAPI(title="多用户 RAG 系统 API")
 llm = ChatCompletion()
+embed = Embedding()
+rank = RankModel()
+
+
+@app.get("/workspaces/{current_user}/{workspace_name}/{conversation_id}",response_model=List[Message])
+async def get_conversation(
+    current_user: str,
+    workspace_name: str,
+    conversation_id: int,
+    db: Session = Depends(get_db)
+):
+    # 获取用户
+    user = db.query(User).filter(User.username == current_user).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    # 获取工作区
+    workspace = db.query(Workspace).filter(
+        Workspace.name == workspace_name,
+        Workspace.user_username == current_user
+    )
+    if not workspace.first():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="工作区不存在或无权限"
+        )
+    # 查询文档
+    conversations = db.query(Conversation).filter(
+        Conversation.user_username == current_user,
+        Conversation.workspace_name == workspace_name,
+        Conversation.id == conversation_id
+    ).first()
+    if not conversations:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="对话不存在或无权限"
+        )
+    responses = []
+    for message in conversations.messages:
+        response = Message(
+            role=message["role"],
+            content=message['content'],
+            timestamp = datetime.utcnow()
+        )
+        responses.append(
+            response
+        )
+
+    return responses
+
+
+@app.get("/workspaces/{current_user}/{workspace_name}",response_model=List[ConversationsResponse])
+async def get_conversations(
+    current_user: str,
+    workspace_name: str,
+    db: Session = Depends(get_db)
+):
+    # 查询用户
+    user = db.query(User).filter(User.username == current_user).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    # 查询工作区
+    workspace = db.query(Workspace).filter(
+        Workspace.name == workspace_name,
+        Workspace.user_username == current_user
+    ).first()
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="工作区不存在或无权限"
+        )
+    # 查询文档
+    conversations = db.query(Conversation).filter(
+        Conversation.user_username == current_user,
+        Conversation.workspace_name == workspace_name
+    ).all()
+    returnResults = []
+    for conversation in conversations:
+        returnResults.append(
+            {
+                "title": conversation.title, # 显示使用的标题
+                "updated_at": conversation.updated_at, # 显示修改时间，排序用
+                "conversation_id": conversation.id
+            }
+        )
+    return returnResults
+
+
+@app.post("/chat", response_model=chatResponse)
+async def chat(request: chatRequest, db: Session = Depends(get_db)):
+    question = request.question
+    current_user = request.user_name
+    conversation_name = request.conversation_name  # 修正变量名
+    workspace_name = request.workspace_name  # 修正变量名
+    conversation_id = request.conversation_id
+
+    # 查询是否存在该对话
+    existing_conversation = db.query(Conversation).filter(
+        Conversation.title == conversation_name,
+        Conversation.user_username == current_user,
+        Conversation.id == conversation_id
+    ).first()
+
+    if existing_conversation:
+        conversation_id = existing_conversation.id
+        # 假设 messages 是一个 JSON 列，存储 [{"role": "user", "content": "..."}, ...]
+        history: List[Dict[str, str]] = existing_conversation.messages or []
+        # 调用 LLM 生成回答（传入历史）
+        answer = llm.answer_question(question, history=history)
+
+        # 将新交互加入历史
+        new_history = history + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer}
+        ]
+        existing_conversation.messages = new_history
+        existing_conversation.updated_at = datetime.utcnow()
+        db.commit()
+    else:
+        # 新对话：无历史
+        answer = llm.answer_question(question)
+        new_conversation = Conversation(
+            user_username=current_user,
+            title = question,
+            workspace_name=workspace_name,  # 注意：模型字段名是否为 workspaces_name？
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            messages=[
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer}
+            ]
+        )
+        db.add(new_conversation)
+        db.commit()
+        db.refresh(new_conversation)
+        conversation_id = new_conversation.id
+
+    return chatResponse(
+        answer=answer,
+        conversation_name=conversation_name,
+    )
+
+
+
+
 
 @app.post("/register", response_model=RegisterResponse)
 async def register(request: RegisterRequest, db: Session = Depends(get_db)):

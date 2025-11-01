@@ -13,7 +13,7 @@ from sentence_transformers import SentenceTransformer  # type: ignore
 class Embedding:
     def __init__(self):
         self.model_path = "/home/dzl/PycharmProjects/SmallRag/BAAI/bge-base-zh-v1.5"
-        self.model = SentenceTransformer.from_pretrained(self.model_path)
+        self.model = SentenceTransformer(self.model_path)
 
     def embed(self,text:str)->np.ndarray:
         return self.model.encode(text)

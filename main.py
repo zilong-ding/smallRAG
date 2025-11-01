@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from AuthManager import AuthManager
 import requests
 import pandas as pd
+import numpy as np
 # FastAPI 服务地址
 BASE_URL = "http://localhost:8000"
 
@@ -42,6 +43,19 @@ class RAGChatApp:
             "大小": "string",
             "修改时间": "string"
         })
+
+        self.conversion_list_value = pd.DataFrame(
+            [],
+            columns=["选择", "标题", "修改时间","conversion_id"]
+        )
+        self.conversion_list_value = self.conversion_list_value.astype({
+            "选择": "bool",
+            "标题": "string",
+            "修改时间": "string",
+            "conversion_id": "int"
+        })
+        self.history = []
+
         self.demo = self._build_ui()
 
     def upload_to_fastapi(self,files):
@@ -98,10 +112,16 @@ class RAGChatApp:
             self.current_user = username
             self.workspaceChoices = self.getWorkspace()
             self.getWorkspaceFiles()
+            self.getConversions(self.workspace_dropdown.value)
+            self.getConversation()
             # self.file_list.value = self.file_list_value
-            return gr.update(visible=False),gr.update(visible=True),username,"登录成功",self.file_list_value
+            return (gr.update(visible=False),gr.update(visible=True),
+                    username,"登录成功",self.file_list_value,
+                    self.conversion_list_value.iloc[:,:3],self.history)
         else:
-            return gr.update(),gr.update(),username,"登录失败",self.file_list_value
+            return (gr.update(),gr.update(),
+                    username,"登录失败",self.file_list_value,
+                    self.conversion_list_value.iloc[:,:3],self.history)
 
     def on_register(self, username, password, confirm):
         if password != confirm:
@@ -150,7 +170,7 @@ class RAGChatApp:
             self.login_btn.click(
                 self.on_login,
                 inputs=[self.login_username, self.login_password],
-                outputs=[self.login_page, self.main_page, current_user, self.login_msg, self.file_list]
+                outputs=[self.login_page, self.main_page, current_user, self.login_msg, self.file_list,self.conversion_list,self.chatbot]
             )
 
             self.reg_btn.click(
@@ -223,6 +243,67 @@ class RAGChatApp:
             print("http 获取文件失败")
             # return []
 
+    def getConversation(self):
+        # df_sorted = df.sort_values(by=df.columns[3])
+        df_sorted = self.conversion_list_value.sort_values(by=self.conversion_list_value.columns[2])
+        self.current_conversion  = df_sorted.iloc[len(df_sorted)-1]
+        workspace_name = self.workspace_dropdown.value
+        self.setCurrentConversation(workspace_name)
+
+    def setCurrentConversation(self,workspace_name):
+        _,title,_,conversation_id = self.current_conversion.values
+        print("当前转换：",workspace_name,title,conversation_id)
+        responses = requests.get(f"{BASE_URL}/workspaces/{self.current_user}/{workspace_name}/{conversation_id}")
+        if responses.status_code == 200:
+            messages = responses.json()
+            if messages:
+                print("获取转换历史消息成功")
+                self.history = []
+                for message in messages:
+                    self.history.append({"role": message["role"], "content": message["content"]})
+            else:
+                print("获取转换历史消息失败")
+        else:
+            print("http 获取转换历史消息失败")
+
+    def select_conversion(self, df: pd.DataFrame, workspace_name: str):
+        if df.empty:
+            return self.history
+
+        # 获取布尔数组（不依赖 index）
+        selected_bool = df["选择"].values  # shape: (n,)
+        selected_indices = np.where(selected_bool)[0]
+
+        if len(selected_indices) != 1:
+            return self.history
+
+        pos = selected_indices[0]  # 整数位置
+
+        # 确保 pos 在 self.conversion_list_value 范围内
+        if pos >= len(self.conversion_list_value):
+            return self.history
+
+        self.current_conversion = self.conversion_list_value.iloc[pos]
+        self.setCurrentConversation(workspace_name)
+        return self.history
+
+
+
+    def getConversions(self,workspace_name):
+        response = requests.get(f"{BASE_URL}/workspaces/{self.current_user}/{workspace_name}")
+        if response.status_code == 200:
+            conversions = response.json()
+            if conversions:
+                print("获取转换成功")
+                self.conversion_list_value = self.conversion_list_value.iloc[0:0]
+                for conversion in conversions:
+                    self.conversion_list_value.loc[len(self.conversion_list_value)] = [False,conversion["title"], conversion["updated_at"], conversion["conversation_id"]]
+            else:
+                print("获取转换失败")
+        else:
+            print("http 获取转换失败")
+        self.conversion_list_value = self.conversion_list_value.sort_values(by=self.conversion_list_value.columns[2])
+
     def _build_main_ui(self):
         """构建主页面（聊天+文件管理）"""
         gr.Markdown("# 🤖 多用户 RAG 聊天系统")
@@ -264,13 +345,55 @@ class RAGChatApp:
 
             with gr.Column():
                 gr.Markdown("### 💬 聊天")
-                self.chatbot = gr.Chatbot(height=400)
+                self.chatbot = gr.Chatbot(height=400,type="messages",label="对话窗口")
                 self.msg_input = gr.Textbox(label="消息", lines=2, placeholder="输入您的问题...")
                 self.send_btn = gr.Button("发送", variant="primary")
+                self.send_btn.click(
+                    self.send_message,
+                    inputs=[self.msg_input, self.workspace_dropdown],
+                    outputs=[self.msg_input,self.chatbot]
+                )
                 with gr.Row():
-                    self.conversion_list = gr.DataFrame(label="选择会话", headers=["标题", "修改时间"])
+                    self.conversion_list = gr.DataFrame(label="选择会话",
+                                                        headers=["选择", "标题", "修改时间"],
+                                                        static_columns=[1, 2],  # 关键：第1、2、3列（0-indexed）不可编辑
+                                                        datatype=["bool", "str", "str"],
+                                                        # 第一列为 bool → 显示为 checkbox
+                                                        interactive=True,  # 必须为 True 才能编辑 checkbox
+                                                        row_count=(0, "dynamic"),
+                                                        col_count=(3, "fixed")
+                                                        )
+                self.select_btn = gr.Button("选择会话")
+                self.select_btn.click(
+                    self.select_conversion,
+                    inputs=[self.conversion_list,self.workspace_dropdown],
+                    outputs=[self.chatbot]
+                )
 
         self.logout_btn = gr.Button("退出登录", variant="stop")
+
+    def send_message(self, question:str,workspace_name: str):
+        inputMessage = question
+        self.history.append({"role": "user", "content": question})
+        _,title,_,conversation_id = self.current_conversion.values
+        # 转换为 Python 原生类型
+        title = str(title) if pd.notna(title) else ""
+        conversation_id = int(conversation_id)  # 或 conversation_id_raw.item()
+        payload = {
+            "question": question,
+            "workspace_name": workspace_name,
+            "user_name": self.current_user,
+            "conversation_name": title,
+            "conversation_id" : conversation_id
+        }
+        response = requests.post(f"{BASE_URL}/chat", json=payload)
+        if response.status_code == 200:
+            message = response.json()
+            self.history.append({"role": "assistant", "content": message["answer"]})
+            inputMessage = ""
+        else:
+            message = "无法回答"
+        return inputMessage,self.history
 
     def change_workspace(self):
         pass

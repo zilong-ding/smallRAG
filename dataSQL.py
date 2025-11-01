@@ -1,7 +1,8 @@
-from sqlalchemy import create_engine, Column, String, DateTime, ForeignKey, Text,Integer
+from sqlalchemy import create_engine, Column, String, DateTime, ForeignKey, Text,Integer,JSON
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from datetime import datetime
 from werkzeug.security import generate_password_hash,check_password_hash
+import json
 """
 该数据库存储用户和用户下创建的对话以及上传的文档之间的关系
     用户注册之后会创建用户
@@ -22,7 +23,10 @@ from werkzeug.security import generate_password_hash,check_password_hash
 """
 
 
-engine = create_engine('sqlite:///data.db', echo=True)
+engine = create_engine('sqlite:///data.db', echo=True,
+                        connect_args={"check_same_thread": False},
+                       json_serializer=lambda x: json.dumps(x, ensure_ascii=False),
+                        json_deserializer=lambda x: json.loads(x))
 Base = declarative_base()
 
 
@@ -108,10 +112,9 @@ class Document(Base):
 class Conversation(Base):
     __tablename__ = 'conversations'
 
-    id = Column(String, primary_key=True)  # e.g., "conv_20240610_123456"
+    id = Column(Integer, primary_key=True, autoincrement=True) # e.g., "conv_20240610_123456"
     title = Column(String, default="新对话")
-    messages = Column(Text)  # JSON 字符串：[{"role": "user", "content": "..."}, ...]
-    rag_enabled = Column(String, default="false")  # 保留为字符串（或改为 Boolean）
+    messages = Column(JSON)  # JSON 字符串：[{"role": "user", "content": "..."}, ...]
     workspace_name = Column(String, nullable=True)  # 关联的 workspace.name（非外键，因对话可能跨会话）
 
     created_at = Column(DateTime, default=datetime.utcnow)
