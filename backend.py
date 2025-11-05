@@ -4,7 +4,8 @@ for var in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY
     if var in os.environ:
         del os.environ[var]
 import uvicorn
-from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form
+from celery import Celery
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form,BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime
 
@@ -13,15 +14,65 @@ from dataSQL import User,get_db,Workspace,Document,Conversation
 from dataSchames import (RegisterRequest,RegisterResponse,UserResponse,ConversationsResponse,
                          LoginRequest,FileItem,chatRequest,chatResponse,Message)
 from model import ChatCompletion,Embedding,RankModel
+from dataES import (DocumentMeta,ChunkInfo,QAHistory,ImageInfo,SmallRAGDB)
 from typing import List,Dict
 import shutil
 import hashlib
+from utills import split_text,extract_with_pdfplumber,extract_and_split_with_pages
 
-
+celery_app = Celery("rag", broker="redis://localhost:6379")
 app = FastAPI(title="多用户 RAG 系统 API")
 llm = ChatCompletion()
 embed = Embedding()
 rank = RankModel()
+ESDB = SmallRAGDB(es_url="http://localhost:9200")
+ESDB.init_indices(overwrite=True)
+
+
+@celery_app.task(bind=True, max_retries=3, autoretry_for=(Exception,))
+def process_pdf_task(self,file_path:str,doc_id:int,workspace_id:int,user_username:str):
+    try:
+        text_blocks,all_page_numbers = extract_and_split_with_pages(file_path)
+        full_text = "\n\n".join(text_blocks)
+        now = datetime.utcnow()
+        doc_meta = DocumentMeta(
+            doc_id=doc_id,
+            workspace_id=workspace_id,
+            user_username=user_username,
+            title=os.path.basename(file_path),
+            file_name=os.path.basename(file_path),
+            abstract=full_text[:500] + "..." if len(full_text) > 500 else full_text,
+            full_content=full_text,  # 可选：若不需要全文检索可省略
+            embedding_status="processing",
+            file_size=os.path.getsize(file_path),
+            file_hash="TODO_compute_hash",  # 建议计算 SHA256
+            created_at=now,
+            updated_at=now,
+        )
+        print(f" 增加 doc_meta{doc_id} 结果",ESDB.create_document(doc_meta))
+
+        chunk_list = []
+        for page_chunks,page_num in zip(text_blocks,all_page_numbers):
+            for chunk_id,chunk_content in enumerate(page_chunks):
+                chunk_info = ChunkInfo(
+                    chunk_id=f"{doc_id}_chunk_{chunk_id*(page_chunks + 1)}",
+                    doc_id=doc_id,
+                    workspace_id=workspace_id,
+                    user_username=user_username,
+                    chunk_content=chunk_content,
+                    page_number=page_num,
+                    created_at=datetime.utcnow(),
+                    embedding_vector = embed.embed(chunk_content).tolist(),
+                    chunk_order = chunk_id*(page_chunks + 1),
+                )
+                chunk_list.append(chunk_info)
+
+        ESDB.bulk_create_chunks(chunk_list)
+        ESDB.refresh_all()
+    except Exception as e:
+        print(f"处理文件 {file_path} 时发生错误：{e}")
+
+
 
 
 @app.get("/workspaces/{current_user}/{workspace_name}/{conversation_id}",response_model=List[Message])
@@ -359,6 +410,13 @@ async def upload_file(
     db.add(new_doc)
     db.commit()
     db.refresh(new_doc)
+
+    task = process_pdf_task.delay(
+        file_path=str(file_path),  # 传递字符串路径
+        doc_id=new_doc.id,
+        workspace_id=workspace.id,
+        user_username=current_user
+    )
 
     return {
         "success": True,

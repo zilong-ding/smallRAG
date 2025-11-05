@@ -246,6 +246,8 @@ class RAGChatApp:
     def getConversation(self):
         # df_sorted = df.sort_values(by=df.columns[3])
         df_sorted = self.conversion_list_value.sort_values(by=self.conversion_list_value.columns[2])
+        if len(df_sorted) == 0:
+            return
         self.current_conversion  = df_sorted.iloc[len(df_sorted)-1]
         workspace_name = self.workspace_dropdown.value
         self.setCurrentConversation(workspace_name)
