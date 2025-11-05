@@ -34,6 +34,7 @@ class RankModel:
         pairs = [[question, c] for c in answers]
         with torch.no_grad():
             inputs = self.tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=512)
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
             scores = self.model(**inputs, return_dict=True).logits.view(-1, ).float()
             print(scores)
             return scores.cpu().numpy()
@@ -46,7 +47,7 @@ class ChatCompletion:
         self.system_prompt = """你是一个智能助手，请直接、准确地回答用户的问题。不要添加解释、前缀或后缀，仅输出答案本身。"""
         self.system_prompt_context = """你是一个智能助手，请根据以下规则回答用户问题：
                                         1. 如果提供的上下文与用户问题相关，请严格依据上下文内容作答，不要编造信息。
-                                        2. 如果上下文与问题无关、信息不足或无法回答，请直接回答“无法根据提供的信息回答该问题。”
+                                        2. 如果上下文与问题无关、信息不足或无法回答，请直接回答“无法根据提供的信息回答该问题。”不要自己回答
                                         3. 回答应简洁明了，仅输出答案本身，不要添加解释、前缀（如“答案是：”）或后缀。"""
         self.client = openai.OpenAI(
             api_key="sk-ea07bf0880504b75a31b1bce38437fcf",

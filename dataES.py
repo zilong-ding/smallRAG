@@ -37,7 +37,7 @@ class ChunkInfo(BaseModel):
     workspace_id: str
     user_username: str
     chunk_content: str
-    embedding_vector: List[float] = Field(..., min_length=1536, max_length=1536)
+    embedding_vector: List[float] = Field(..., min_length=768, max_length=768)
     chunk_order: int
     page_number: Optional[int] = None
     metadata: dict = Field(default_factory=dict)
@@ -49,8 +49,8 @@ class QAHistory(BaseModel):
     user_username: str
     question: str
     answer: str
-    qa_vector: List[float] = Field(..., min_length=1536, max_length=1536)
-    qa_concat_vector: List[float] = Field(..., min_length=1536, max_length=1536)
+    qa_vector: List[float] = Field(..., min_length=768, max_length=768)
+    qa_concat_vector: List[float] = Field(..., min_length=768, max_length=768)
     workspace_id: str
     created_at: datetime
 
@@ -168,7 +168,7 @@ class SmallRAGDB:
                         "workspace_id": {"type": "keyword"},
                         "user_username": {"type": "keyword"},
                         "chunk_content": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_max_word"},
-                        "embedding_vector": {"type": "dense_vector", "dims": 1536, "index": True, "similarity": "cosine"},
+                        "embedding_vector": {"type": "dense_vector", "dims": 768, "index": True, "similarity": "cosine"},
                         "chunk_order": {"type": "integer"},
                         "page_number": {"type": "integer"},
                         "metadata": {"type": "object"},
@@ -183,8 +183,8 @@ class SmallRAGDB:
                         "user_username": {"type": "keyword"},
                         "question": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
                         "answer": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
-                        "qa_vector": {"type": "dense_vector", "dims": 1536, "index": True, "similarity": "cosine"},
-                        "qa_concat_vector": {"type": "dense_vector", "dims": 1536, "index": True, "similarity": "cosine"},
+                        "qa_vector": {"type": "dense_vector", "dims": 768, "index": True, "similarity": "cosine"},
+                        "qa_concat_vector": {"type": "dense_vector", "dims": 768, "index": True, "similarity": "cosine"},
                         "workspace_id": {"type": "keyword"},
                         "created_at": {"type": "date"}
                     }
@@ -337,6 +337,75 @@ class SmallRAGDB:
             }
         )
         return [hit["_source"] for hit in res["hits"]["hits"]]
+
+    def hybrid_search_chunks(
+            self,
+            text_query: str,
+            vector_query: List[float],
+            workspace_id:int,
+            username:str,
+            top_k_text: int = 5,
+            top_k_vector: int = 5
+    ) -> Dict[str, List[Dict]]:
+        """
+        混合检索：同时执行全文检索和向量检索，返回两类结果。
+
+        Args:
+            text_query: 用于全文检索的关键词或句子
+            vector_query: 768维的查询向量
+            top_k_text: 全文检索返回数量
+            top_k_vector: 向量检索返回数量
+
+        Returns:
+            {
+                "text_hits": [...],
+                "vector_hits": [...]
+            }
+        """
+        # 临时加一行调试
+        print("Total chunks in index:", self.es.count(index=self._indices["chunk"])["count"])
+        # 1. 全文检索（BM25）
+        text_res = self.es.search(
+            index=self._indices["chunk"],
+            body={
+                "size": top_k_text,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"match": {"chunk_content": text_query}}
+                        ],
+                        "filter": [
+                            {"term": {"workspace_id": workspace_id}},
+                            {"term": {"user_username": username}}
+                        ]
+                    }
+                }
+            }
+        )
+        text_hits = [hit["_source"] for hit in text_res["hits"]["hits"]]
+
+        # 2. 向量检索（KNN）
+        vector_res = self.es.search(
+            index=self._indices["chunk"],
+            body={
+                "knn": {
+                    "field": "embedding_vector",
+                    "query_vector": vector_query,
+                    "k": top_k_vector,
+                    "num_candidates": max(10, top_k_vector * 2),
+                    "filter": [  # ✅ 新增过滤条件
+                        {"term": {"workspace_id": workspace_id}},
+                        {"term": {"user_username": username}}
+                    ]
+                }
+            }
+        )
+        vector_hits = [hit["_source"] for hit in vector_res["hits"]["hits"]]
+
+        return {
+            "text_hits": text_hits,
+            "vector_hits": vector_hits
+        }
 
     def search_images_by_vector(self, vector: List[float], k: int = 5) -> List[Dict]:
         res = self.es.search(

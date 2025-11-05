@@ -24,7 +24,7 @@ def test_smallrag_db():
 
     # 1. 初始化索引（覆盖）
     print("\n1️⃣ 初始化索引...")
-    assert db.init_indices(overwrite=True), "索引初始化失败"
+    assert db.init_indices(overwrite=False), "索引初始化失败"
     time.sleep(1)  # 等待 ES 内部刷新
 
     # 2. 测试 Document
@@ -164,6 +164,22 @@ def test_smallrag_db():
     print("✅ tags 字段类型正确")
 
     print("\n🎉 所有测试通过！")
+    test_query = "知识图谱"
+
+    res = db.es.search(
+        index=db._indices["chunk"],
+        body={
+            "query": {"match": {"chunk_content": test_query}},
+            "size": 5
+        }
+    )
+    print("BM25 命中数:", res["hits"]["total"]["value"])
+    for hit in res["hits"]["hits"]:
+        print(hit["_source"]["chunk_content"][:100])
+
+# def check_es():
+#     # 选一个你确定存在于 chunk 中的词，比如 "模型"、"RAG"、"PDF"
+
 
 
 if __name__ == "__main__":

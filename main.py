@@ -377,7 +377,12 @@ class RAGChatApp:
     def send_message(self, question:str,workspace_name: str):
         inputMessage = question
         self.history.append({"role": "user", "content": question})
-        _,title,_,conversation_id = self.current_conversion.values
+        try:
+            _,title,_,conversation_id = self.current_conversion.values
+        except:
+            self.current_conversion = None
+            title = question
+            conversation_id = -1
         # 转换为 Python 原生类型
         title = str(title) if pd.notna(title) else ""
         conversation_id = int(conversation_id)  # 或 conversation_id_raw.item()

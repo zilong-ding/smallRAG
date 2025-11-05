@@ -24,20 +24,20 @@ celery_app = Celery("rag", broker="redis://localhost:6379")
 app = FastAPI(title="多用户 RAG 系统 API")
 llm = ChatCompletion()
 embed = Embedding()
-rank = RankModel()
+ranker = RankModel()
 ESDB = SmallRAGDB(es_url="http://localhost:9200")
-ESDB.init_indices(overwrite=True)
+ESDB.init_indices(overwrite=False)
 
 
-@celery_app.task(bind=True, max_retries=3, autoretry_for=(Exception,))
-def process_pdf_task(self,file_path:str,doc_id:int,workspace_id:int,user_username:str):
+# @celery_app.task(bind=True, max_retries=3, autoretry_for=(Exception,))
+def process_pdf_task(file_path:str,doc_id:int,workspace_id:int,user_username:str):
     try:
         text_blocks,all_page_numbers = extract_and_split_with_pages(file_path)
         full_text = "\n\n".join(text_blocks)
         now = datetime.utcnow()
         doc_meta = DocumentMeta(
-            doc_id=doc_id,
-            workspace_id=workspace_id,
+            doc_id=str(doc_id),
+            workspace_id=str(workspace_id),
             user_username=user_username,
             title=os.path.basename(file_path),
             file_name=os.path.basename(file_path),
@@ -49,23 +49,24 @@ def process_pdf_task(self,file_path:str,doc_id:int,workspace_id:int,user_usernam
             created_at=now,
             updated_at=now,
         )
-        print(f" 增加 doc_meta{doc_id} 结果",ESDB.create_document(doc_meta))
+        print(f" 增加 doc_meta{doc_id} 结果",ESDB.create_document(str(doc_id),doc_meta))
 
         chunk_list = []
+        chunk_id = 0
         for page_chunks,page_num in zip(text_blocks,all_page_numbers):
-            for chunk_id,chunk_content in enumerate(page_chunks):
-                chunk_info = ChunkInfo(
-                    chunk_id=f"{doc_id}_chunk_{chunk_id*(page_chunks + 1)}",
-                    doc_id=doc_id,
-                    workspace_id=workspace_id,
-                    user_username=user_username,
-                    chunk_content=chunk_content,
-                    page_number=page_num,
-                    created_at=datetime.utcnow(),
-                    embedding_vector = embed.embed(chunk_content).tolist(),
-                    chunk_order = chunk_id*(page_chunks + 1),
-                )
-                chunk_list.append(chunk_info)
+            chunk_info = ChunkInfo(
+                chunk_id=f"{doc_id}_chunk_{chunk_id*(page_num + 1)}",
+                doc_id=str(doc_id),
+                workspace_id=str(workspace_id),
+                user_username=user_username,
+                chunk_content=page_chunks,
+                page_number=page_num,
+                created_at=datetime.utcnow(),
+                embedding_vector = embed.embed(page_chunks).tolist(),
+                chunk_order = chunk_id*(page_num + 1),
+            )
+            chunk_list.append(chunk_info)
+            chunk_id += 1
 
         ESDB.bulk_create_chunks(chunk_list)
         ESDB.refresh_all()
@@ -172,19 +173,88 @@ async def chat(request: chatRequest, db: Session = Depends(get_db)):
     workspace_name = request.workspace_name  # 修正变量名
     conversation_id = request.conversation_id
 
+    workspace = db.query(Workspace).filter(
+        Workspace.name == workspace_name,
+        Workspace.user_username == current_user
+    ).first()
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="工作区不存在或无权限"
+        )
+
     # 查询是否存在该对话
     existing_conversation = db.query(Conversation).filter(
         Conversation.title == conversation_name,
         Conversation.user_username == current_user,
         Conversation.id == conversation_id
     ).first()
+    question_vector = embed.embed(question).tolist()
+    results = ESDB.hybrid_search_chunks(question,question_vector,
+                                        workspace_id=str(workspace.id),
+                                        username=current_user,
+                                        top_k_text=10,top_k_vector=10)
+    bm25_hits,bge_hits = results["text_hits"],results["vector_hits"]
+    print("bm25_hits:",len(bm25_hits))
+    print("bge_hits:",len(bge_hits))
+
+    context = None
+
+    # Step 1: RRF 融合（按 chunk_id）
+    k_rrf = 60
+    fusion_score = {}
+
+    # 添加 BM25 结果
+    for rank, hit in enumerate(bm25_hits):
+        print("text: ", hit["chunk_content"])
+        chunk_id = hit["chunk_id"]
+        fusion_score[chunk_id] = fusion_score.get(chunk_id, 0) + 1.0 / (rank + 1 + k_rrf)
+
+    # 添加 BGE 向量结果
+    for rank, hit in enumerate(bge_hits):
+        print("text: ", hit["chunk_content"])
+        chunk_id = hit["chunk_id"]
+        fusion_score[chunk_id] = fusion_score.get(chunk_id, 0) + 1.0 / (rank + 1 + k_rrf)
+
+    # 按 RRF 分数排序，取 top candidates（例如前 20 用于 rerank）
+    rrf_sorted = sorted(fusion_score.items(), key=lambda x: x[1], reverse=True)
+    top_candidate_ids = [cid for cid, score in rrf_sorted[:10]]  # 取前10个 chunk_id
+
+    if not top_candidate_ids:
+        final_results = []
+    else:
+        # Step 2: 获取完整 chunk 内容（去重后）
+        candidate_chunks = []
+        seen = set()
+        for hit in bm25_hits + bge_hits:
+            cid = hit["chunk_id"]
+            if cid in top_candidate_ids and cid not in seen:
+                candidate_chunks.append(hit)
+                seen.add(cid)
+                if len(candidate_chunks) >= len(top_candidate_ids):
+                    break
+
+        # Step 3: 用 RankModel 重排序
+        contents = [chunk["chunk_content"] for chunk in candidate_chunks]
+        print("contents:",contents)
+        rerank_scores = ranker.rank(question, contents)  # shape: (N,)
+
+        # 绑定分数并排序
+        scored_chunks = [(chunk, score) for chunk, score in zip(candidate_chunks, rerank_scores)]
+        scored_chunks.sort(key=lambda x: x[1], reverse=True)
+
+        # Step 4: 返回最终 top-k（例如 top 5）
+        final_results = [chunk for chunk, score in scored_chunks[:5]]
+
+    context = "\n".join([chunk["chunk_content"] for chunk in final_results])
+    print("最终结果：", context)
 
     if existing_conversation:
         conversation_id = existing_conversation.id
         # 假设 messages 是一个 JSON 列，存储 [{"role": "user", "content": "..."}, ...]
         history: List[Dict[str, str]] = existing_conversation.messages or []
         # 调用 LLM 生成回答（传入历史）
-        answer = llm.answer_question(question, history=history)
+        answer = llm.answer_question(question, history=history, context=context)
 
         # 将新交互加入历史
         new_history = history + [
@@ -196,7 +266,7 @@ async def chat(request: chatRequest, db: Session = Depends(get_db)):
         db.commit()
     else:
         # 新对话：无历史
-        answer = llm.answer_question(question)
+        answer = llm.answer_question(question, context=context)
         new_conversation = Conversation(
             user_username=current_user,
             title = question,
@@ -411,7 +481,13 @@ async def upload_file(
     db.commit()
     db.refresh(new_doc)
 
-    task = process_pdf_task.delay(
+    # task = process_pdf_task.delay(
+    #     file_path=str(file_path),  # 传递字符串路径
+    #     doc_id=new_doc.id,
+    #     workspace_id=workspace.id,
+    #     user_username=current_user
+    # )
+    process_pdf_task(
         file_path=str(file_path),  # 传递字符串路径
         doc_id=new_doc.id,
         workspace_id=workspace.id,

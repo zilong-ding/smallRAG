@@ -71,3 +71,8 @@ def extract_and_split_with_pages(pdf_path: str) -> Tuple[List[List[str]], List[i
             all_page_numbers.extend([page.page_number] * len(page_chunks))
 
     return all_chunks, all_page_numbers
+
+if __name__ == "__main__":
+    texts, pages = extract_and_split_with_pages("/home/dzl/PycharmProjects/SmallRag/data/users/dzl/uploads/default/RAG学习.pdf")
+    print(texts)
+    print(pages)

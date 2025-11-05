@@ -338,6 +338,61 @@ class SmallRAGDB:
         )
         return [hit["_source"] for hit in res["hits"]["hits"]]
 
+    def hybrid_search_chunks(
+            self,
+            text_query: str,
+            vector_query: List[float],
+            top_k_text: int = 5,
+            top_k_vector: int = 5
+    ) -> Dict[str, List[Dict]]:
+        """
+        混合检索：同时执行全文检索和向量检索，返回两类结果。
+
+        Args:
+            text_query: 用于全文检索的关键词或句子
+            vector_query: 1536维的查询向量
+            top_k_text: 全文检索返回数量
+            top_k_vector: 向量检索返回数量
+
+        Returns:
+            {
+                "text_hits": [...],
+                "vector_hits": [...]
+            }
+        """
+        # 1. 全文检索（BM25）
+        text_res = self.es.search(
+            index=self._indices["chunk"],
+            body={
+                "query": {
+                    "match": {
+                        "chunk_content": text_query
+                    }
+                },
+                "size": top_k_text
+            }
+        )
+        text_hits = [hit["_source"] for hit in text_res["hits"]["hits"]]
+
+        # 2. 向量检索（KNN）
+        vector_res = self.es.search(
+            index=self._indices["chunk"],
+            body={
+                "knn": {
+                    "field": "embedding_vector",
+                    "query_vector": vector_query,
+                    "k": top_k_vector,
+                    "num_candidates": max(10, top_k_vector * 2)
+                }
+            }
+        )
+        vector_hits = [hit["_source"] for hit in vector_res["hits"]["hits"]]
+
+        return {
+            "text_hits": text_hits,
+            "vector_hits": vector_hits
+        }
+
     def search_images_by_vector(self, vector: List[float], k: int = 5) -> List[Dict]:
         res = self.es.search(
             index=self._indices["image"],
