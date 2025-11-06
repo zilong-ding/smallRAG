@@ -1,0 +1,17 @@
+gradio==5.49.1
+requests==2.32.4
+pandas==2.3.1
+numpy==1.26.4
+torch==2.8.0+cu129
+openai==1.109.1
+transformers==4.51.3
+sentence-transformers==5.1.0
+pydantic==2.11.10
+elasticsearch==8.17.0
+pdfplumber==0.10.4
+langchain-text-splitters==0.3.11
+uvicorn==0.35.0
+celery==5.5.3
+fastapi==0.119.0
+sqlalchemy==2.0.43
+werkzeug==3.1.3
