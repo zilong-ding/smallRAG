@@ -1,5 +1,5 @@
 # 🌟 SmallRAG — 轻量级多用户 RAG 文档问答系统
-
+![2025-11-06_15-29.jpg](https://cdn.jsdelivr.net/gh/zilong-ding/note-gen-image-sync@main/f166febb-f7ee-4762-9617-5c1f840d02f6.jpeg)
 > 基于 **FastAPI + Gradio + Elasticsearch + Ollama** 构建的本地化多用户 RAG 系统，支持 PDF 上传、智能分块、混合检索与对话管理。
 
 ```mermaid
