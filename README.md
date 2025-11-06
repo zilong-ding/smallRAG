@@ -152,15 +152,32 @@ smallrag/
 ```python
 # model.py 示例
 class Embedding:
-    def embed(self, text: str) -> np.ndarray:
-        # 改为你的 embedding API
-        return ollama.embeddings(model="nomic-embed-text", prompt=text)["embedding"]
+    def __init__(self):
+        self.model_path = "/home/dzl/PycharmProjects/SmallRag/BAAI/bge-base-zh-v1.5"
+        self.model = SentenceTransformer(self.model_path)
 
+    def embed(self,text:str)->np.ndarray:
+        return self.model.encode(text)
+
+    def check_similarity(self,embedding1,embedding2):
+        similarity = self.model.similarity(embedding1, embedding2)
+        return similarity.numpy()
+    
 class ChatCompletion:
-    def answer_question(self, question: str, history=None, context=None) -> str:
-        # 改为你的 LLM 调用
-        prompt = f"基于以下上下文：{context}\n\n问题：{question}"
-        return ollama.generate(model="llama3", prompt=prompt)["response"]
+    def __init__(self):
+        self.model = "qwen-max"
+        self.system_prompt = """你是一个智能助手，请直接、准确地回答用户的问题。不要添加解释、前缀或后缀，仅输出答案本身。"""
+        self.system_prompt_context = """你是一个智能助手，请根据以下规则回答用户问题：
+                                        1. 如果提供的上下文与用户问题相关，请严格依据上下文内容作答，不要编造信息。
+                                        2. 如果上下文与问题无关、信息不足或无法回答，请直接回答“无法根据提供的信息回答该问题。”不要自己回答
+                                        3. 回答应简洁明了，仅输出答案本身，不要添加解释、前缀（如“答案是：”）或后缀。"""
+        self.client = openai.OpenAI(
+            api_key="sk-ea07bf0880504b65a31b1bce38417fcf",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 修复多余空格
+        )
+
+
+
 ```
 
 ---
