@@ -113,8 +113,8 @@ smallrag/
 │       ├── uploads/{workspace}/
 │       └── conversations/
 ├── data.db                     # SQLite 数据库
-├── main_fastapi.py             # FastAPI 后端
-├── main_gradio.py              # Gradio 前端
+├── backend.py             # FastAPI 后端
+├── main.py              # Gradio 前端
 ├── dataSQL.py                  # SQLAlchemy 模型
 ├── dataSchames.py              # Pydantic 模型
 ├── dataES.py                   # Elasticsearch 封装
