@@ -4,14 +4,16 @@
 
 ```mermaid
 graph LR
-    A[Gradio Frontend] -->|HTTP/JSON| B(FastAPI Backend)
-    B --> C[SQLite: 用户/工作区/文档/对话]
-    B --> D[Elasticsearch: 文本分块 + 向量]
-    B --> E[Ollama: embedding + LLM]
-    D -->|检索结果| B
-    C -->|文件列表/对话历史| A
-    E -->|生成回答| B
+    A[Gradio Frontend] -->|HTTP/JSON 请求| B(FastAPI Backend)
+    B -->|查询| C[(SQLite: 用户/工作区/文档/对话)]
+    B -->|检索| D[(Elasticsearch: 文本分块 + 向量)]
+    B -->|调用| E[(Ollama: embedding + LLM)]
+    D -->|返回检索结果| B
+    C -->|返回结构化数据| B
+    E -->|返回文本/向量| B
+    B -->|HTTP/JSON 响应| A
 ```
+
 *（示意图：前端 Gradio ↔ 后端 FastAPI ↔ Elasticsearch + SQLite + Ollama）*
 
 ---
