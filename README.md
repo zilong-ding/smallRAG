@@ -90,14 +90,14 @@ ollama pull llama3             # 大语言模型
 
 ```bash
 # 启动 FastAPI（端口 8000）
-python main_fastapi.py
+python backend.py
 ```
 
 ### 4. 启动前端界面
 
 ```bash
 # 启动 Gradio（端口 7860）
-python main_gradio.py
+python main.py
 ```
 
 然后访问：http://localhost:7860
